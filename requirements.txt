@@ -1,0 +1,15 @@
+Flask>=2.0
+python-dotenv>=0.20
+flask-cors
+jinja2
+python-docx
+# Optional (for PDF output):
+pdfkit
+# Gemini client(s) - install one of these depending on which you need:
+google-generativeai
+# or if using the new 'google' package (choose whichever matches your local environment):
+# google-genai
+openai
+requests
+pylatex
+reportlab
