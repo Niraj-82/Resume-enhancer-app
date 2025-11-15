@@ -2,3 +2,10 @@ venv/
 backend/venv/
 node_modules/
 .env
+*.pdf
+*.docx
+*.tex
+*.aux
+*.log
+TODO.md
+.gitignore

@@ -5,47 +5,84 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from google import genai
 import json
+import openai
+from openai import OpenAI
+import requests
+from pylatex import Document, Section, Subsection, Command
+from pylatex.utils import italic, NoEscape
+import tempfile
+import subprocess
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("resume-backend")
 
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ATS_API_KEY = os.getenv("ATS_API_KEY")  # For ATS scoring API
 
-
-if not API_KEY:
+if not GEMINI_API_KEY:
     raise Exception("❌ No Gemini API key found in .env!")
 
-client = genai.Client(api_key=API_KEY)
-log.info("Gemini client initialized.")
-log.info(f"Gemini API key present. Default model: {MODEL}")
+if not OPENAI_API_KEY:
+    raise Exception("❌ No OpenAI API key found in .env!")
+
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+log.info("Gemini and OpenAI clients initialized.")
+log.info(f"Gemini model: {GEMINI_MODEL}")
 
 app = Flask(__name__)
 CORS(app)
 
 
-def enhance_with_gemini(text: str) -> str:
+def enhance_with_openai(text: str) -> str:
     prompt = f"""
-Enhance the following resume text. 
-- Improve grammar 
-- Rewrite into strong ATS-optimized bullets 
-- Use measurable achievements 
-- Improve tone 
+Enhance the following resume text.
+- Improve grammar
+- Rewrite into strong ATS-optimized bullets
+- Use measurable achievements
+- Improve tone
 - Output ONLY improved resume text.
 
 Resume:
 {text}
 """
 
-    response = client.models.generate_content(
-        model=MODEL,
+    response = openai_client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1000
+    )
+    return response.choices[0].message.content.strip()
+
+def enhance_with_gemini(text: str) -> str:
+    prompt = f"""
+Enhance the following resume text.
+- Improve grammar
+- Rewrite into strong ATS-optimized bullets
+- Use measurable achievements
+- Improve tone
+- Output ONLY improved resume text.
+
+Resume:
+{text}
+"""
+
+    response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
         contents=prompt
     )
     return response.text
 
 
 def ats_analysis(text: str):
+    # Placeholder for real ATS API integration, e.g., resume.io or similar free service
+    # For now, using mock data; replace with actual API call
+    if ATS_API_KEY:
+        # Example: requests.post("https://api.resume.io/ats-score", headers={"Authorization": ATS_API_KEY}, json={"resume": text})
+        pass  # Implement real API call here
     return {
         "overall_score": 78,
         "keyword_score": 71,
@@ -91,7 +128,7 @@ def enhance_resume():
     print(f"📄 Raw file length: {len(raw)}")
 
     try:
-        enhanced = enhance_with_gemini(raw)
+        enhanced = enhance_with_openai(raw)  # Using OpenAI for primary enhancement
         structured = extract_resume_structure(enhanced)
         ats = ats_analysis(raw)
 
@@ -110,25 +147,35 @@ def enhance_resume():
 @app.route("/export/pdf", methods=["POST"])
 def export_pdf():
     data = request.json
-    html = f"""
-    <html><body>
-        <h1>{data.get('name')}</h1>
-        <h2>{data.get('job_title')}</h2>
-        <p>{data.get('summary')}</p>
+    # Use LaTeX for PDF generation
+    doc = Document()
+    doc.preamble.append(Command('title', data.get('name')))
+    doc.preamble.append(Command('author', data.get('job_title')))
+    doc.append(NoEscape(r'\maketitle'))
 
-        <h3>Skills</h3>
-        <ul>{"".join(f"<li>{s}</li>" for s in data.get("skills", []))}</ul>
+    with doc.create(Section('Summary')):
+        doc.append(data.get('summary'))
 
-        <h3>Experience</h3>
-        {''.join(f"<p><b>{x['position']}</b> — {x['company']} ({x['years']})<br>{x['description']}</p>" for x in data.get("experience", []))}
-    </body></html>
-    """
+    with doc.create(Section('Skills')):
+        for skill in data.get("skills", []):
+            doc.append(f'\\item {skill}')
+        doc.append(NoEscape(r'\end{itemize}'))
 
-    filename = "resume_export.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
+    with doc.create(Section('Experience')):
+        for exp in data.get("experience", []):
+            with doc.create(Subsection(f"{exp['position']} at {exp['company']} ({exp['years']})")):
+                doc.append(exp['description'])
 
-    return jsonify({"file": filename})
+    # Compile to PDF
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tex_file = os.path.join(tmpdir, 'resume.tex')
+        pdf_file = os.path.join(tmpdir, 'resume.pdf')
+        doc.generate_tex(tex_file)
+        subprocess.run(['pdflatex', '-output-directory', tmpdir, tex_file], check=True)
+        with open(pdf_file, 'rb') as f:
+            pdf_data = f.read()
+
+    return send_file(pdf_data, as_attachment=True, download_name='resume.pdf', mimetype='application/pdf')
 
 
 @app.route("/export/docx", methods=["POST"])
@@ -164,6 +211,39 @@ def export_docx():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/manual-entry", methods=["POST"])
+def manual_entry():
+    data = request.json
+    # Process manual entry data
+    text = f"{data.get('name')} - {data.get('job_title')}\n\nSummary: {data.get('summary')}\n\nSkills: {', '.join(data.get('skills', []))}\n\nExperience:\n"
+    for exp in data.get('experience', []):
+        text += f"{exp['position']} at {exp['company']} ({exp['years']}): {exp['description']}\n"
+    enhanced = enhance_with_openai(text)
+    ats = ats_analysis(text)
+    return jsonify({"enhanced_text": enhanced, "ats": ats, "structured": data})
+
+@app.route("/ats-score", methods=["POST"])
+def ats_score():
+    text = request.json.get("text")
+    score = ats_analysis(text)
+    return jsonify(score)
+
+@app.route("/feedback-chat", methods=["POST"])
+def feedback_chat():
+    message = request.json.get("message")
+    # Use OpenAI for chat feedback
+    response = openai_client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": f"Provide feedback on this resume improvement suggestion: {message}"}],
+        max_tokens=500
+    )
+    return jsonify({"response": response.choices[0].message.content.strip()})
+
+@app.route("/score-tracker", methods=["GET"])
+def score_tracker():
+    # Placeholder for tracking score changes; in real app, store in DB
+    return jsonify({"history": [{"date": "2023-10-01", "score": 75}, {"date": "2023-10-02", "score": 80}]})
 
 @app.route("/download/<path:filename>")
 def download(filename):
